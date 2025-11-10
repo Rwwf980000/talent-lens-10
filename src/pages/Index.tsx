@@ -53,14 +53,21 @@ const Index = () => {
 
     setIsGenerating(true);
     try {
-      const response = await fetch("/api/generate-job-description", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobTitle }),
-      });
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-job-description`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ jobTitle }),
+        }
+      );
 
       if (!response.ok) {
-        throw new Error("Failed to generate job description");
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to generate job description");
       }
 
       const data = await response.json();
@@ -74,7 +81,7 @@ const Index = () => {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to generate job description. Please try again.",
+        description: error instanceof Error ? error.message : "Failed to generate job description. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -85,14 +92,21 @@ const Index = () => {
   const evaluateCandidate = async () => {
     setIsEvaluating(true);
     try {
-      const response = await fetch("/api/evaluate-candidate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobDescription, resume }),
-      });
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evaluate-candidate`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ jobDescription, resume }),
+        }
+      );
 
       if (!response.ok) {
-        throw new Error("Failed to evaluate candidate");
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to evaluate candidate");
       }
 
       const data = await response.json();
@@ -113,7 +127,7 @@ const Index = () => {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to evaluate candidate. Please try again.",
+        description: error instanceof Error ? error.message : "Failed to evaluate candidate. Please try again.",
         variant: "destructive",
       });
     } finally {

@@ -1,0 +1,7 @@
+project_id = "hmgycodjbhcrmxljhhue"
+
+[functions.generate-job-description]
+verify_jwt = false
+
+[functions.evaluate-candidate]
+verify_jwt = false
