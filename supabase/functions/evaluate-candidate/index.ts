@@ -3,152 +3,255 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+interface DebugLog {
+  timestamp: string;
+  action: string;
+  details: any;
+  status?: string;
+}
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const debugLogs: DebugLog[] = [];
+  
   try {
     const { jobDescription, resume } = await req.json();
-    console.log('Evaluating candidate - Job description length:', jobDescription?.length, 'Resume length:', resume?.length);
+    debugLogs.push({
+      timestamp: new Date().toISOString(),
+      action: 'Request Received',
+      details: {
+        jobDescriptionLength: jobDescription?.length,
+        resumeLength: resume?.length,
+      },
+      status: 'success'
+    });
+
+    console.log('Evaluating candidate via CrewAI - Job description length:', jobDescription?.length, 'Resume length:', resume?.length);
 
     if (!jobDescription || !resume) {
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: 'Validation Failed',
+        details: { error: 'Missing required fields' },
+        status: 'error'
+      });
       return new Response(
-        JSON.stringify({ error: 'Both job description and resume are required' }),
+        JSON.stringify({ error: 'Both job description and resume are required', debugLogs }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-    if (!LOVABLE_API_KEY) {
-      console.error('LOVABLE_API_KEY is not configured');
+    const CREWAI_BASE_URL = Deno.env.get('CREWAI_BASE_URL');
+    const CREWAI_BEARER_TOKEN = Deno.env.get('CREWAI_BEARER_TOKEN');
+
+    if (!CREWAI_BASE_URL || !CREWAI_BEARER_TOKEN) {
+      console.error('CrewAI credentials not configured');
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: 'Configuration Error',
+        details: { error: 'CrewAI credentials not configured' },
+        status: 'error'
+      });
       return new Response(
-        JSON.stringify({ error: 'AI service is not configured' }),
+        JSON.stringify({ error: 'CrewAI service is not configured', debugLogs }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    // Step 1: Kickoff the CrewAI evaluation
+    debugLogs.push({
+      timestamp: new Date().toISOString(),
+      action: 'Kickoff Request to CrewAI',
+      details: {
+        url: `${CREWAI_BASE_URL}/kickoff`,
+        payload: { jobDescription, resume }
+      },
+      status: 'pending'
+    });
+
+    const kickoffResponse = await fetch(`${CREWAI_BASE_URL}/kickoff`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+        'Authorization': `Bearer ${CREWAI_BEARER_TOKEN}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert talent evaluator and HR professional. Analyze candidates based on:
-
-1. SOFT SKILLS (0-100): Communication, leadership, teamwork, problem-solving, adaptability, emotional intelligence
-2. HARD SKILLS (0-100): Technical expertise, industry knowledge, certifications, tools proficiency, specific job requirements
-3. POTENTIAL (0-100): Growth mindset, learning ability, cultural fit, career trajectory, passion for the field
-
-Provide scores and a detailed 200-300 word summary explaining your assessment.
-
-CRITICAL: You must respond with ONLY valid JSON in this exact format:
-{
-  "softSkills": <number 0-100>,
-  "hardSkills": <number 0-100>,
-  "potential": <number 0-100>,
-  "summary": "<detailed evaluation text>"
-}
-
-Do not include any text before or after the JSON object.`
-          },
-          {
-            role: 'user',
-            content: `Evaluate this candidate for the following position:
-
-JOB DESCRIPTION:
-${jobDescription}
-
-CANDIDATE RESUME:
-${resume}
-
-Provide your evaluation as JSON with softSkills, hardSkills, potential (all 0-100), and a summary.`
-          }
-        ],
-        temperature: 0.5,
+        inputs: {
+          jobDescription,
+          resume
+        }
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('AI Gateway error:', response.status, errorText);
+    if (!kickoffResponse.ok) {
+      const errorText = await kickoffResponse.text();
+      console.error('CrewAI kickoff error:', kickoffResponse.status, errorText);
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: 'Kickoff Failed',
+        details: {
+          status: kickoffResponse.status,
+          error: errorText
+        },
+        status: 'error'
+      });
       
-      if (response.status === 429) {
-        return new Response(
-          JSON.stringify({ error: 'Rate limit exceeded. Please try again in a moment.' }),
-          { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-      
-      if (response.status === 402) {
-        return new Response(
-          JSON.stringify({ error: 'AI credits depleted. Please add more credits to continue.' }),
-          { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-
       return new Response(
-        JSON.stringify({ error: 'Failed to evaluate candidate' }),
+        JSON.stringify({ error: 'Failed to initiate evaluation', debugLogs }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const data = await response.json();
-    const rawContent = data.choices[0].message.content;
+    const kickoffData = await kickoffResponse.json();
+    const kickoffId = kickoffData.kickoff_id;
 
-    console.log('AI response received, parsing evaluation...');
+    debugLogs.push({
+      timestamp: new Date().toISOString(),
+      action: 'Kickoff Response Received',
+      details: {
+        kickoff_id: kickoffId,
+        response: kickoffData
+      },
+      status: 'success'
+    });
 
-    // Parse the JSON response from AI
+    console.log('CrewAI kickoff successful, ID:', kickoffId);
+
+    // Step 2: Poll for status until completion
+    let attempts = 0;
+    const maxAttempts = 60; // 5 minutes max (5 second intervals)
     let evaluation;
-    try {
-      // Try to extract JSON if there's extra text
-      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        evaluation = JSON.parse(jsonMatch[0]);
-      } else {
-        evaluation = JSON.parse(rawContent);
+
+    while (attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds between polls
+      attempts++;
+
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: `Status Check (Attempt ${attempts})`,
+        details: {
+          url: `${CREWAI_BASE_URL}/status/${kickoffId}`,
+          kickoff_id: kickoffId
+        },
+        status: 'pending'
+      });
+
+      const statusResponse = await fetch(`${CREWAI_BASE_URL}/status/${kickoffId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${CREWAI_BEARER_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!statusResponse.ok) {
+        const errorText = await statusResponse.text();
+        console.error('CrewAI status check error:', statusResponse.status, errorText);
+        debugLogs.push({
+          timestamp: new Date().toISOString(),
+          action: 'Status Check Failed',
+          details: {
+            status: statusResponse.status,
+            error: errorText
+          },
+          status: 'error'
+        });
+        continue;
       }
 
-      // Validate the response structure
-      if (
-        typeof evaluation.softSkills !== 'number' ||
-        typeof evaluation.hardSkills !== 'number' ||
-        typeof evaluation.potential !== 'number' ||
-        typeof evaluation.summary !== 'string'
-      ) {
-        throw new Error('Invalid evaluation structure');
+      const statusData = await statusResponse.json();
+      
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: 'Status Response Received',
+        details: {
+          status: statusData.status,
+          response: statusData
+        },
+        status: statusData.status === 'COMPLETE' ? 'success' : 'pending'
+      });
+
+      console.log('CrewAI status:', statusData.status);
+
+      if (statusData.status === 'COMPLETE') {
+        evaluation = statusData.result || statusData.output;
+        debugLogs.push({
+          timestamp: new Date().toISOString(),
+          action: 'Evaluation Complete',
+          details: { evaluation },
+          status: 'success'
+        });
+        break;
+      } else if (statusData.status === 'ERROR' || statusData.status === 'FAILED') {
+        debugLogs.push({
+          timestamp: new Date().toISOString(),
+          action: 'Evaluation Failed',
+          details: { error: statusData.error || 'Unknown error' },
+          status: 'error'
+        });
+        throw new Error(statusData.error || 'CrewAI evaluation failed');
       }
+    }
 
-      // Ensure scores are within 0-100 range
-      evaluation.softSkills = Math.max(0, Math.min(100, Math.round(evaluation.softSkills)));
-      evaluation.hardSkills = Math.max(0, Math.min(100, Math.round(evaluation.hardSkills)));
-      evaluation.potential = Math.max(0, Math.min(100, Math.round(evaluation.potential)));
-
-    } catch (parseError) {
-      console.error('Failed to parse AI response:', parseError, 'Raw content:', rawContent);
+    if (!evaluation) {
+      debugLogs.push({
+        timestamp: new Date().toISOString(),
+        action: 'Timeout',
+        details: { error: 'Evaluation timed out after maximum attempts' },
+        status: 'error'
+      });
       return new Response(
-        JSON.stringify({ error: 'Failed to parse evaluation results' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ error: 'Evaluation timed out. Please try again.', debugLogs }),
+        { status: 408, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    console.log('Successfully evaluated candidate:', evaluation);
+    console.log('Successfully received evaluation from CrewAI:', evaluation);
+
+    // Parse and validate the evaluation result
+    let parsedEvaluation;
+    if (typeof evaluation === 'string') {
+      try {
+        parsedEvaluation = JSON.parse(evaluation);
+      } catch {
+        parsedEvaluation = evaluation;
+      }
+    } else {
+      parsedEvaluation = evaluation;
+    }
+
+    debugLogs.push({
+      timestamp: new Date().toISOString(),
+      action: 'Final Response',
+      details: { evaluation: parsedEvaluation },
+      status: 'success'
+    });
 
     return new Response(
-      JSON.stringify(evaluation),
+      JSON.stringify({
+        ...parsedEvaluation,
+        debugLogs
+      }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error) {
     console.error('Error in evaluate-candidate:', error);
+    debugLogs.push({
+      timestamp: new Date().toISOString(),
+      action: 'Fatal Error',
+      details: { error: error instanceof Error ? error.message : 'Unknown error' },
+      status: 'error'
+    });
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' }),
+      JSON.stringify({ 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        debugLogs 
+      }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }

@@ -5,13 +5,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, FileText, User, Sparkles, Download, RotateCcw, Copy } from "lucide-react";
+import { Loader2, FileText, User, Sparkles, Download, RotateCcw, Copy, ChevronDown, ChevronUp, Terminal } from "lucide-react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+
+interface DebugLog {
+  timestamp: string;
+  action: string;
+  details: any;
+  status?: string;
+}
 
 interface EvaluationResults {
   softSkills: number;
   hardSkills: number;
   potential: number;
   summary: string;
+  debugLogs?: DebugLog[];
 }
 
 const Index = () => {
@@ -22,6 +31,8 @@ const Index = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [results, setResults] = useState<EvaluationResults | null>(null);
+  const [debugLogs, setDebugLogs] = useState<DebugLog[]>([]);
+  const [isDebugOpen, setIsDebugOpen] = useState(false);
   const { toast } = useToast();
 
   // Load from localStorage on mount
@@ -110,6 +121,13 @@ const Index = () => {
       }
 
       const data = await response.json();
+      
+      // Extract debug logs if present
+      if (data.debugLogs) {
+        setDebugLogs(data.debugLogs);
+        delete data.debugLogs;
+      }
+      
       setResults(data);
       
       // Smooth scroll to results
@@ -122,7 +140,7 @@ const Index = () => {
 
       toast({
         title: "Evaluation Complete",
-        description: "Candidate has been successfully evaluated!",
+        description: "Candidate has been successfully evaluated via CrewAI!",
       });
     } catch (error) {
       toast({
@@ -139,6 +157,7 @@ const Index = () => {
     setJobDescription("");
     setResume("");
     setResults(null);
+    setDebugLogs([]);
     setShowJobTitleInput(false);
     setJobTitle("");
     localStorage.removeItem("jobDescription");
@@ -443,6 +462,82 @@ ${resume}
           </div>
         )}
       </main>
+
+      {/* Debug Console */}
+      {debugLogs.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-50">
+          <Collapsible open={isDebugOpen} onOpenChange={setIsDebugOpen}>
+            <div className="bg-card border-t shadow-lg">
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  className="w-full flex items-center justify-between px-6 py-4 hover:bg-accent"
+                >
+                  <div className="flex items-center gap-2">
+                    <Terminal className="h-4 w-4 text-primary" />
+                    <span className="font-semibold">Debug Console</span>
+                    <span className="text-sm text-muted-foreground">
+                      ({debugLogs.length} logs)
+                    </span>
+                  </div>
+                  {isDebugOpen ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronUp className="h-4 w-4" />
+                  )}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="max-h-96 overflow-y-auto px-6 pb-4">
+                  <div className="space-y-2">
+                    {debugLogs.map((log, index) => (
+                      <Card
+                        key={index}
+                        className={`transition-all ${
+                          log.status === 'error'
+                            ? 'border-destructive bg-destructive/5'
+                            : log.status === 'success'
+                            ? 'border-primary bg-primary/5'
+                            : 'border-muted'
+                        }`}
+                      >
+                        <CardContent className="p-3">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-sm">{log.action}</span>
+                                {log.status && (
+                                  <span
+                                    className={`text-xs px-2 py-0.5 rounded-full ${
+                                      log.status === 'error'
+                                        ? 'bg-destructive text-destructive-foreground'
+                                        : log.status === 'success'
+                                        ? 'bg-primary text-primary-foreground'
+                                        : 'bg-muted text-muted-foreground'
+                                    }`}
+                                  >
+                                    {log.status}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-muted-foreground">
+                                {new Date(log.timestamp).toLocaleTimeString()}
+                              </div>
+                              <pre className="text-xs bg-muted p-2 rounded mt-2 overflow-x-auto">
+                                {JSON.stringify(log.details, null, 2)}
+                              </pre>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              </CollapsibleContent>
+            </div>
+          </Collapsible>
+        </div>
+      )}
     </div>
   );
 };
