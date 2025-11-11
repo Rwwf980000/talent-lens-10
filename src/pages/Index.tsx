@@ -3,10 +3,14 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, FileText, User, Sparkles, Download, RotateCcw, Copy, ChevronDown, ChevronUp, Terminal } from "lucide-react";
+import { Loader2, FileText, Sparkles, Download, RotateCcw, ChevronDown, ChevronUp, Terminal } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { PdfUploadZone } from "@/components/PdfUploadZone";
+import { UploadedFilesList } from "@/components/UploadedFilesList";
+import { ResultsTable } from "@/components/ResultsTable";
+import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { extractTextFromPdf } from "@/utils/pdfParser";
 
 interface DebugLog {
   timestamp: string;
@@ -15,22 +19,35 @@ interface DebugLog {
   status?: string;
 }
 
-interface EvaluationResults {
+interface UploadedFile {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  textContent?: string;
+}
+
+interface CandidateResult {
+  fileId: string;
+  fileName: string;
   softSkills: number;
   hardSkills: number;
   potential: number;
   summary: string;
-  debugLogs?: DebugLog[];
+  overallScore: number;
 }
 
 const Index = () => {
   const [jobDescription, setJobDescription] = useState("");
-  const [resume, setResume] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [showJobTitleInput, setShowJobTitleInput] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [isEvaluating, setIsEvaluating] = useState(false);
-  const [results, setResults] = useState<EvaluationResults | null>(null);
+  const [evaluationProgress, setEvaluationProgress] = useState({ current: 0, total: 0 });
+  const [allResults, setAllResults] = useState<CandidateResult[]>([]);
+  const [selectedCandidate, setSelectedCandidate] = useState<CandidateResult | null>(null);
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([]);
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const { toast } = useToast();
@@ -38,19 +55,13 @@ const Index = () => {
   // Load from localStorage on mount
   useEffect(() => {
     const savedJobDesc = localStorage.getItem("jobDescription");
-    const savedResume = localStorage.getItem("resume");
     if (savedJobDesc) setJobDescription(savedJobDesc);
-    if (savedResume) setResume(savedResume);
   }, []);
 
   // Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("jobDescription", jobDescription);
   }, [jobDescription]);
-
-  useEffect(() => {
-    localStorage.setItem("resume", resume);
-  }, [resume]);
 
   const generateJobDescription = async () => {
     if (!jobTitle.trim()) {
@@ -100,108 +111,212 @@ const Index = () => {
     }
   };
 
-  const evaluateCandidate = async () => {
-    setIsEvaluating(true);
-    try {
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evaluate-candidate`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({ jobDescription, resume }),
-        }
-      );
+  const handleFilesAdded = async (newFiles: File[]) => {
+    const filesWithIds = newFiles.map(file => ({
+      id: `${Date.now()}-${Math.random()}`,
+      file,
+      name: file.name,
+      size: file.size,
+    }));
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to evaluate candidate");
-      }
+    setUploadedFiles(prev => [...prev, ...filesWithIds]);
 
-      const data = await response.json();
-      
-      // Extract debug logs if present
-      if (data.debugLogs) {
-        setDebugLogs(data.debugLogs);
-        delete data.debugLogs;
-      }
-      
-      setResults(data);
-      
-      // Smooth scroll to results
-      setTimeout(() => {
-        document.getElementById("results-section")?.scrollIntoView({ 
-          behavior: "smooth",
-          block: "start"
+    // Extract text from PDFs
+    for (const fileData of filesWithIds) {
+      try {
+        const text = await extractTextFromPdf(fileData.file);
+        setUploadedFiles(prev =>
+          prev.map(f =>
+            f.id === fileData.id ? { ...f, textContent: text } : f
+          )
+        );
+      } catch (error) {
+        toast({
+          title: "PDF Processing Error",
+          description: error instanceof Error ? error.message : `Failed to process ${fileData.name}`,
+          variant: "destructive",
         });
-      }, 100);
+        // Remove the file if it failed to process
+        setUploadedFiles(prev => prev.filter(f => f.id !== fileData.id));
+      }
+    }
+  };
 
+  const handleRemoveFile = (id: string) => {
+    setUploadedFiles(prev => prev.filter(f => f.id !== id));
+  };
+
+  const evaluateCandidates = async () => {
+    if (!jobDescription.trim()) {
       toast({
-        title: "Evaluation Complete",
-        description: "Candidate has been successfully evaluated via CrewAI!",
-      });
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to evaluate candidate. Please try again.",
+        title: "Job description required",
+        description: "Please enter a job description first.",
         variant: "destructive",
       });
-    } finally {
-      setIsEvaluating(false);
+      return;
     }
+
+    const filesToEvaluate = uploadedFiles.filter(f => f.textContent);
+    if (filesToEvaluate.length === 0) {
+      toast({
+        title: "No resumes ready",
+        description: "Please wait for PDFs to finish processing.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsEvaluating(true);
+    setEvaluationProgress({ current: 0, total: filesToEvaluate.length });
+    setAllResults([]);
+    const newDebugLogs: DebugLog[] = [];
+
+    const results: CandidateResult[] = [];
+
+    for (let i = 0; i < filesToEvaluate.length; i++) {
+      const file = filesToEvaluate[i];
+      setEvaluationProgress({ current: i + 1, total: filesToEvaluate.length });
+
+      try {
+        const response = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evaluate-candidate`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+            },
+            body: JSON.stringify({ 
+              jobDescription, 
+              resume: file.textContent 
+            }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || "Failed to evaluate candidate");
+        }
+
+        const data = await response.json();
+
+        // Extract debug logs if present
+        if (data.debugLogs) {
+          newDebugLogs.push(...data.debugLogs);
+          delete data.debugLogs;
+        }
+
+        const result: CandidateResult = {
+          fileId: file.id,
+          fileName: file.name.replace('.pdf', ''),
+          softSkills: data.softSkills,
+          hardSkills: data.hardSkills,
+          potential: data.potential,
+          summary: data.summary,
+          overallScore: Math.round((data.softSkills + data.hardSkills + data.potential) / 3),
+        };
+
+        results.push(result);
+        setAllResults([...results]);
+      } catch (error) {
+        toast({
+          title: "Evaluation Error",
+          description: `Failed to evaluate ${file.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
+          variant: "destructive",
+        });
+        
+        newDebugLogs.push({
+          timestamp: new Date().toISOString(),
+          action: `Evaluation Failed: ${file.name}`,
+          details: { error: error instanceof Error ? error.message : "Unknown error" },
+          status: "error",
+        });
+      }
+    }
+
+    setDebugLogs(newDebugLogs);
+    setIsEvaluating(false);
+
+    // Smooth scroll to results
+    setTimeout(() => {
+      document.getElementById("results-section")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    }, 100);
+
+    toast({
+      title: "Evaluation Complete",
+      description: `Successfully evaluated ${results.length} out of ${filesToEvaluate.length} candidates via CrewAI!`,
+    });
   };
 
   const resetForm = () => {
     setJobDescription("");
-    setResume("");
-    setResults(null);
+    setUploadedFiles([]);
+    setAllResults([]);
     setDebugLogs([]);
     setShowJobTitleInput(false);
     setJobTitle("");
+    setEvaluationProgress({ current: 0, total: 0 });
     localStorage.removeItem("jobDescription");
-    localStorage.removeItem("resume");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
-    toast({
-      title: "Copied!",
-      description: `${label} copied to clipboard.`,
-    });
-  };
+  const downloadAllReports = () => {
+    if (allResults.length === 0) return;
 
-  const downloadReport = () => {
-    if (!results) return;
+    const avgSoftSkills = Math.round(allResults.reduce((sum, r) => sum + r.softSkills, 0) / allResults.length);
+    const avgHardSkills = Math.round(allResults.reduce((sum, r) => sum + r.hardSkills, 0) / allResults.length);
+    const avgPotential = Math.round(allResults.reduce((sum, r) => sum + r.potential, 0) / allResults.length);
+    const avgOverall = Math.round(allResults.reduce((sum, r) => sum + r.overallScore, 0) / allResults.length);
+
+    const topCandidates = [...allResults]
+      .sort((a, b) => b.overallScore - a.overallScore)
+      .slice(0, 3)
+      .map(c => `${c.fileName} (${c.overallScore})`)
+      .join(', ');
 
     const reportContent = `
-TALENT EVALUATION REPORT
-========================
+BULK TALENT EVALUATION REPORT
+==============================
 
-Soft Skills Score: ${results.softSkills}/100
-Hard Skills Score: ${results.hardSkills}/100
-Potential Score: ${results.potential}/100
+Total Candidates Evaluated: ${allResults.length}
 
-SUMMARY
--------
-${results.summary}
+SUMMARY STATISTICS
+------------------
+Average Soft Skills: ${avgSoftSkills}/100
+Average Hard Skills: ${avgHardSkills}/100
+Average Potential: ${avgPotential}/100
+Average Overall Score: ${avgOverall}/100
+
+Top Candidates: ${topCandidates}
 
 JOB DESCRIPTION
 --------------
 ${jobDescription}
 
-RESUME
-------
-${resume}
+INDIVIDUAL RESULTS
+------------------
+${allResults.map((r, i) => `
+${i + 1}. ${r.fileName}
+   Overall Score: ${r.overallScore}/100
+   Soft Skills: ${r.softSkills}/100
+   Hard Skills: ${r.hardSkills}/100
+   Potential: ${r.potential}/100
+   
+   Summary:
+   ${r.summary}
+   
+   ---
+`).join('\n')}
     `.trim();
 
     const blob = new Blob([reportContent], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "talent-evaluation-report.txt";
+    a.download = "bulk-talent-evaluation-report.txt";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -209,11 +324,25 @@ ${resume}
 
     toast({
       title: "Report Downloaded",
-      description: "Evaluation report has been downloaded successfully.",
+      description: `Bulk evaluation report with ${allResults.length} candidates has been downloaded.`,
     });
   };
 
-  const isFormValid = jobDescription.trim().length > 0 && resume.trim().length > 0;
+  const handleViewDetails = (candidate: CandidateResult) => {
+    setSelectedCandidate(candidate);
+    setIsDetailsModalOpen(true);
+  };
+
+  const handleNavigateCandidate = (direction: "prev" | "next") => {
+    if (!selectedCandidate) return;
+    const currentIndex = allResults.findIndex(c => c.fileId === selectedCandidate.fileId);
+    const newIndex = direction === "prev" ? currentIndex - 1 : currentIndex + 1;
+    if (newIndex >= 0 && newIndex < allResults.length) {
+      setSelectedCandidate(allResults[newIndex]);
+    }
+  };
+
+  const isFormValid = jobDescription.trim().length > 0 && uploadedFiles.some(f => f.textContent);
 
   return (
     <div className="min-h-screen bg-background">
@@ -233,7 +362,7 @@ ${resume}
       {/* Main Content */}
       <main className="container mx-auto px-4 py-8 max-w-7xl">
         {/* Input Section */}
-        <div className="grid md:grid-cols-2 gap-6 mb-8">
+        <div className="grid gap-6 mb-8">
           {/* Job Description */}
           <Card className="transition-all hover:shadow-lg">
             <CardHeader>
@@ -313,154 +442,91 @@ ${resume}
             </CardContent>
           </Card>
 
-          {/* Resume */}
+          {/* PDF Upload */}
           <Card className="transition-all hover:shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <User className="h-5 w-5 text-primary" />
-                Resume
+                <FileText className="h-5 w-5 text-primary" />
+                Candidate Resumes
               </CardTitle>
               <CardDescription>
-                Paste the candidate's resume text
+                Upload PDF resumes for bulk evaluation
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Textarea
-                  placeholder="Paste the candidate's resume here..."
-                  value={resume}
-                  onChange={(e) => setResume(e.target.value)}
-                  className={`min-h-[300px] resize-none transition-all focus:shadow-md ${
-                    resume ? "border-primary/50" : ""
-                  }`}
-                />
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>{resume.length} characters</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setResume("")}
-                    disabled={!resume}
-                  >
-                    Clear
-                  </Button>
-                </div>
-              </div>
+              <PdfUploadZone 
+                onFilesAdded={handleFilesAdded}
+                disabled={isEvaluating}
+              />
+              <UploadedFilesList 
+                files={uploadedFiles}
+                onRemove={handleRemoveFile}
+              />
             </CardContent>
           </Card>
         </div>
 
         {/* Evaluate Button */}
-        <div className="flex justify-center mb-12">
+        <div className="flex flex-col items-center gap-4 mb-12">
           <Button
             size="lg"
             className="h-14 px-12 text-lg font-semibold shadow-lg hover:shadow-xl transition-all"
-            onClick={evaluateCandidate}
+            onClick={evaluateCandidates}
             disabled={!isFormValid || isEvaluating}
           >
             {isEvaluating ? (
               <>
                 <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                Analyzing candidate...
+                Evaluating candidate {evaluationProgress.current} of {evaluationProgress.total}...
               </>
             ) : (
               <>
                 <Sparkles className="h-5 w-5 mr-2" />
-                Evaluate Candidate
+                Evaluate Candidates
               </>
             )}
           </Button>
+          {isEvaluating && (
+            <div className="w-full max-w-md">
+              <div className="text-sm text-muted-foreground text-center mb-2">
+                Progress: {evaluationProgress.current} / {evaluationProgress.total}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Results Section */}
-        {results && (
+        {allResults.length > 0 && (
           <div id="results-section" className="animate-fade-in space-y-6">
             <div className="flex items-center justify-between">
               <h2 className="text-2xl font-bold text-foreground">Evaluation Results</h2>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={downloadReport}>
+                <Button variant="outline" onClick={downloadAllReports}>
                   <Download className="h-4 w-4 mr-2" />
-                  Download Report
+                  Download All Reports
                 </Button>
                 <Button variant="outline" onClick={resetForm}>
                   <RotateCcw className="h-4 w-4 mr-2" />
-                  Evaluate Another
+                  Start New Evaluation
                 </Button>
               </div>
             </div>
 
-            {/* Score Cards */}
-            <div className="grid md:grid-cols-3 gap-6">
-              {/* Soft Skills */}
-              <Card className="transition-all hover:shadow-lg">
-                <CardHeader>
-                  <CardTitle className="text-lg">Soft Skills</CardTitle>
-                  <CardDescription>Communication, teamwork, adaptability</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="text-4xl font-bold text-primary">
-                    {results.softSkills}
-                    <span className="text-2xl text-muted-foreground">/100</span>
-                  </div>
-                  <Progress value={results.softSkills} className="h-3" />
-                </CardContent>
-              </Card>
-
-              {/* Hard Skills */}
-              <Card className="transition-all hover:shadow-lg">
-                <CardHeader>
-                  <CardTitle className="text-lg">Hard Skills</CardTitle>
-                  <CardDescription>Technical abilities and expertise</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="text-4xl font-bold text-primary">
-                    {results.hardSkills}
-                    <span className="text-2xl text-muted-foreground">/100</span>
-                  </div>
-                  <Progress value={results.hardSkills} className="h-3" />
-                </CardContent>
-              </Card>
-
-              {/* Potential */}
-              <Card className="transition-all hover:shadow-lg">
-                <CardHeader>
-                  <CardTitle className="text-lg">Potential</CardTitle>
-                  <CardDescription>Growth and development capacity</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="text-4xl font-bold text-primary">
-                    {results.potential}
-                    <span className="text-2xl text-muted-foreground">/100</span>
-                  </div>
-                  <Progress value={results.potential} className="h-3" />
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Summary */}
-            <Card className="transition-all hover:shadow-lg">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Evaluation Summary</CardTitle>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => copyToClipboard(results.summary, "Summary")}
-                  >
-                    <Copy className="h-4 w-4 mr-2" />
-                    Copy
-                  </Button>
-                </div>
-                <CardDescription>Detailed analysis of the candidate</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="prose prose-sm max-w-none whitespace-pre-wrap text-foreground">
-                  {results.summary}
-                </div>
-              </CardContent>
-            </Card>
+            <ResultsTable 
+              results={allResults}
+              onViewDetails={handleViewDetails}
+            />
           </div>
         )}
+
+        {/* Candidate Details Modal */}
+        <CandidateDetailsModal
+          candidate={selectedCandidate}
+          isOpen={isDetailsModalOpen}
+          onClose={() => setIsDetailsModalOpen(false)}
+          allCandidates={allResults}
+          onNavigate={handleNavigateCandidate}
+        />
       </main>
 
       {/* Debug Console */}
