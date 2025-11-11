@@ -3,7 +3,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 // Configure PDF.js worker using the package's built-in worker
 // This works better with Vite than loading from CDN
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
+  'pdfjs-dist/build/pdf.worker.mjs',
   import.meta.url
 ).toString();
 
